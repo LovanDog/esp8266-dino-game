@@ -1,5 +1,6 @@
 #include <ESP8266WiFi.h>
 #include <SSD1306.h>
+#include <EEPROM.h>
 
 #define OLED_SDA  D1
 #define OLED_SCL  D2
@@ -7,48 +8,55 @@
 
 SSD1306 display(OLED_ADDR, OLED_SDA, OLED_SCL);
 
-#define FLASH_BUTTON 0  // Flash button pin
-#define RESET_BUTTON 16 // Reset button pin
-
-// Dinosaur position
+// dino pos
 int dinoX = 20;
 int dinoY = 30;
 
-// Dinosaur size
+// dino size
 int dinoWidth = 10;
 int dinoHeight = 10;
 
-// Gravity
+// gravity
 float gravity = 0.3;
 float velocity = 0;
-float jumpVelocity = -3; // Adjust this value for lower/higher jumps
+float jumpVelocity = -3; // lower/higher jumps
 
-// Game state
+// game state
 bool isJumping = false;
-bool isGameOver = false;
+enum GameState {
+  START_SCREEN,
+  PLAYING,
+  GAME_OVER
+};
 
-// Obstacle properties
+// obstacle
 int obstacleWidth = 10;
 int obstacleHeight = 10;
 int obstacleSpeed = 3;
 int obstacleX = 128;
 int obstacleY = 30;
 
-// Score
-int score = 0;
-int x = 123;
+// score/speed/
+int currentScore = 0;
+int bestScore = 0;
+int gameSpeed = 40;
 
-const unsigned char epd_bitmap_output_onlinepngtools [] PROGMEM = {
-	0x07, 0xc0, 0x07, 0x40, 0x07, 0xc0, 0x8f, 0xc0, 0xff, 0x00, 0xfe, 0x00, 0x7f, 0x00, 0x3c, 0x00, 
-	0x14, 0x00, 0x1a, 0x00
-};
+int x = 123; // int for score x distance 
 
+// level up arrow
+bool showArrow = false;
+unsigned long arrowStartTime;
+
+GameState gameState = START_SCREEN;
 
 void setup() {
-  pinMode(FLASH_BUTTON, INPUT_PULLUP);
-  pinMode(RESET_BUTTON, INPUT_PULLUP);
+  pinMode(0, INPUT_PULLUP); // flash
+  pinMode(16, INPUT_PULLUP); // reset
   
   Serial.begin(115200);
+
+  EEPROM.begin(sizeof(bestScore));
+  EEPROM.get(0, bestScore);
 
   display.init();
   display.flipScreenVertically();
@@ -58,84 +66,132 @@ void setup() {
 }
 
 void loop() {
-  // Clear the display
+  unsigned long loopStartTime = millis();
+
   display.clear();
-  
-  // Check for game over
-  if (!isGameOver) {
-    // Check for jump action
-    if (digitalRead(FLASH_BUTTON) == LOW && !isJumping) {
-      isJumping = true;
-      velocity = jumpVelocity; // Jump velocity
+
+  if (showArrow) {
+    display.drawString(0, 0, "^^");
+    if (millis() - arrowStartTime >= 3000) {
+      showArrow = false;
     }
-    
-    // Apply gravity
-    if (isJumping) {
-      velocity += gravity;
-      dinoY += velocity;
+  }
+
+  switch (gameState) {
+    case START_SCREEN:
+      display.clear();
+      display.setFont(ArialMT_Plain_16);
+      display.drawString(0, 0, "PRESS FLASH");
+      display.setFont(ArialMT_Plain_10);
+      display.drawString(0, 20, "to start");
+      display.display();
       
-      // Check for ground
-      if (dinoY >= 30) {
-        dinoY = 30;
-        velocity = 0;
-        isJumping = false;
+      if (digitalRead(FLASH_BUTTON) == LOW) {
+        gameState = PLAYING;
       }
-    }
-    
-    // Move the obstacle
-    obstacleX -= obstacleSpeed;
-    if (obstacleX < -obstacleWidth) {
-      obstacleWidth = random(5, 15);
-      obstacleX = random(150, 200); // Generate obstacle at random position
-      score++; // Increment score when a new obstacle appears
-    }
-    
-    // Check for collision with the obstacle
-    if (dinoX + dinoWidth >= obstacleX && dinoX <= obstacleX + obstacleWidth &&
-        dinoY + dinoHeight >= obstacleY && dinoY <= obstacleY + obstacleHeight) {
-      isGameOver = true;
-    }
+      break;
+      
+    case PLAYING:
+      handleInput();
+      updateGame();
+      renderGame();
+
+      display.display();
+      break;
+      
+    case GAME_OVER:
+      handleGameOver();
+      break;
   }
-  
-  // Draw the dinosaur
-  display.fillRect(dinoX, dinoY, dinoWidth, dinoHeight);
-  
-  // Draw the obstacle
-  display.fillRect(obstacleX, obstacleY, obstacleWidth, obstacleHeight);
-  
-  // Draw the ground
-  display.drawLine(0, 40, 128, 40);
-  
-  // Draw the score
-  if (score < 10) {
-    x = 123;
-  } else if (score > 9) {
-    x = 117;
-  }
-  display.drawString(x, 0, String(score));
-  
-  // Game over
-  if (isGameOver) {
-    display.drawString(0, 0, "Lose. Press rst to restart");
-  }
-  
-  // Update the display
+
   display.display();
-  
-  // Check for reset button press to restart the game
-  if (digitalRead(RESET_BUTTON) == LOW) {
-    resetGame();
-  }
-  
-  // Delay for smooth rendering
-  delay(50);
+  maintainFrameRate(loopStartTime);
 }
 
-// Function to reset the game
+void handleInput() {
+  if (digitalRead(FLASH_BUTTON) == LOW && !isJumping) {
+    isJumping = true;
+    velocity = jumpVelocity;
+  }
+}
+
+void updateGame() {
+  // gravity
+  if (isJumping) {
+    velocity += gravity;
+    dinoY += velocity;
+
+    // ground
+    if (dinoY >= 30) {
+      dinoY = 30;
+      velocity = 0;
+      isJumping = false;
+    }
+  }
+
+  obstacleX -= obstacleSpeed;
+  if (obstacleX < -obstacleWidth) {
+    obstacleWidth = random(5, 17);
+    obstacleX = random(150, 200);
+    currentScore++;
+
+    if (currentScore % 10 == 0 && gameSpeed > 10) {
+      gameSpeed -= 5;
+      showArrow = true;
+      arrowStartTime = millis();
+    }
+  }
+
+  if (dinoX + dinoWidth >= obstacleX && dinoX <= obstacleX + obstacleWidth &&
+      dinoY + dinoHeight >= obstacleY && dinoY <= obstacleY + obstacleHeight) {
+    gameState = GAME_OVER;
+  }
+}
+
+void renderGame() {
+  // dino
+  display.fillRect(dinoX, dinoY, dinoWidth, dinoHeight);
+  
+  // obstacle
+  display.fillRect(obstacleX, obstacleY, obstacleWidth, obstacleHeight);
+  
+  // ground
+  display.drawLine(0, 40, 128, 40);
+  
+  // score
+  int x = (currentScore < 10) ? 123 : 117;
+  display.drawString(x, 0, String(currentScore));
+}
+
+void handleGameOver() {
+  if (currentScore > bestScore) {
+    bestScore = currentScore;
+    EEPROM.put(0, bestScore);
+    EEPROM.commit();
+  }
+
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(0, 0, "Game Over");
+  display.setFont(ArialMT_Plain_10);
+  display.drawString(0, 20, "Best: " + String(bestScore));
+
+  display.display();
+
+  resetGame();
+}
+
+void maintainFrameRate(unsigned long loopStartTime) {
+  unsigned long loopEndTime = millis();
+  if (loopEndTime - loopStartTime < gameSpeed) {
+    delay(gameSpeed - (loopEndTime - loopStartTime));
+  }
+}
+
+
 void resetGame() {
-  isGameOver = false;
   dinoY = 30;
   velocity = 0;
   obstacleX = 128;
-  score = 0;
+  currentScore = 0;
+  gameSpeed = 50;
 }
